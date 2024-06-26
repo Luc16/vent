@@ -316,7 +316,7 @@ namespace vent {
         Buffer outBuffer{VentManager::getInstance().getDevice(),
                         sizeof(T) * (size/256 + 1),
                         vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc, properties};
-        std::cout << "heyy\n";
+
         std::string transformRedShader = createReduceShader(uboText, getType(first), getType(&init), reduceOp, transformOp);
         std::string reduceShader = createReduceShader(uboText, getType(&init), getType(&init), reduceOp, "");
         auto& kernels = VentManager::getInstance().getKernels();

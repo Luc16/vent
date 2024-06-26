@@ -71,7 +71,7 @@ void pcg(std::vector<T>& matrix, std::vector<T>& b, std::vector<T>& res) {
 
 }
 
-int main1() {
+int main() {
     const uint32_t cells_per_line = 120;
 
     std::vector<float> solidCells(cells_per_line*cells_per_line);
@@ -130,9 +130,5 @@ int main1() {
     end = std::chrono::high_resolution_clock::now();
     auto time = std::chrono::duration<double>(end - start).count();
     std::cout << "Time taken using vent: " << time << " seconds, speedup: " << seq_time/time << "\n";
-}
-
-int main() {
-
 }
 

@@ -42,18 +42,95 @@ vent::transform(
 );
 // output = {3, 12, 27, 48, 75}
 
-// Transform also supports binary operations
-std::vector<int> input2 = {1, 2, 3, 4, 5};
+```
+
+Transform also supports binary operations
+
+```cpp
+// Example of a simple transform operation
+std::vector<int> input1 = {1, 2, 3, 4, 5};
+std::vector<int> input2 = {5, 4, 3, 2, 1};
+std::vector<float> output(input1.size());
 
 vent::transform(
-        input.begin(), // Input iterators
-        input.end(), 
-        input2.begin(), // Input2 iterators
+        input1.begin(), // Input iterators
+        input1.end(), 
+        input2.begin(),
         output.begin(), // Output iterator
-        "float res(int val, int val2) {return float(val*val2);}", // transform function
+        "float res(int val1, int val2) {return float(val1*val2);}" // transform function
 );
+// output = {5, 8, 9, 8, 5}
 
 ```
+
+### `vent::transform_reduce` and `vent::reduce`
+
+```cpp
+    // Example of a simple transform_reduce operation
+std::vector<int> input = {1, 2, 3, 4, 5};
+int m = 3;
+int r0 = vent::reduce(
+    input.begin(), // Input iterators
+    input.end(),
+    10, // initial value
+    vent::ReduceOperation::add // reduce operation
+); // r0 = 25
+
+int r1 = vent::transform_reduce(
+    input.begin(), // Input iterators
+    input.end(),
+    0, // initial value
+    vent::ReduceOperation::add, // reduce operation
+    "int res(int val) {return multiplier*val;}", // transform function
+    std::make_tuple(std::make_pair("multiplier", m)) // additional variables
+); // r1 = 45
+
+// binary transform reduce is dot product by default
+int r2 = vent::transform_reduce(
+    input.begin(), // Input iterators
+    input.end(),
+    input.begin(), // Second iterator
+    0 // initial value
+); // r2 = 55
+```
+
+### `vent::linsolve`
+
+The linsolve function can use either jacobi or Conjugate Gradient to solve a 
+system o linear equations. The choice depends on if you specify if the matrix is positive definite or not.
+
+```cpp
+    uint32_t size = 2;
+std::vector<float> matrix = {
+        4, 1,
+        1, 3
+};
+std::vector<float> vector = {1, 2};
+
+std::vector<float> resultsCG(size);
+std::vector<float> resultsJCB(size);
+
+vent::linsolve(
+        matrix.begin(), // matrix iterators
+        matrix.end(), 
+        vector.begin(), // vector iterators
+        resultsCG.begin(), // output iterator
+        200, // max iterations
+        1e-4, // tolerance
+        true // positive definite
+); // resultsCG = {0.0909091, 0.636364}
+
+vent::linsolve(
+        matrix.begin(), // matrix iterators
+        matrix.end(),
+        vector.begin(), // vector iterators
+        resultsJCB.begin(), // output iterator
+        200, // max iterations
+        1e-4, // tolerance
+        false // positive definite
+); // resultsJCB = {0.0909087, 0.636361}
+```
+
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
