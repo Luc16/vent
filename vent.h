@@ -1312,6 +1312,7 @@ namespace vent {
      *  @param d_first Output iterator to the beginning of the destination vector.
      *  @param maxIters Maximum number of iterations.
      *  @param epsilon  Error tolerance.
+     *  @param isPositiveDefinite If true, the conjugate gradient method will be used.
      *  @param isHostBuffer If true, the buffer will be host visible and coherent.
      *  @return Output iterator to the beginning of the destination vector.
      */
