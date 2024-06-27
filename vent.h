@@ -931,6 +931,8 @@ namespace vent {
     /* @brief Transforms the elements in the range [first1, last1) and [first2, first2 + (last1 - first1)) using the
      *        operation provided and applies a reduction operation, returning the result.
      *
+     * If no operation is provided, the function will perform a inner product operation.
+     *
      *  @param first1  Input iterator to the beginning of the first range.
      *  @param last1   Input iterator to the end of the first range.
      *  @param first2  Input iterator to the beginning of the second range.
