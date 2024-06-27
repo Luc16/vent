@@ -6,11 +6,566 @@
 #define VULKANCOMPUTEPLAYGROUND_VENT_H
 
 #include <vector>
-#include "Buffer.h"
-#include "VentManager.h"
-#include "Kernel.h"
+#include <vulkan/vulkan.hpp>
+#include <shaderc/shaderc.hpp>
 
 namespace vent {
+    class Device {
+    public:
+        Device() {
+            vk::ApplicationInfo appInfo{
+                    "VulkanCompute",	// Application Name
+                    1,					// Application Version
+                    nullptr,			// Engine Name or nullptr
+                    0,					// Engine Version
+                    VK_API_VERSION_1_3  // Vulkan API version
+            };
+
+            const std::vector<const char*> layers = { "VK_LAYER_KHRONOS_validation" };
+            vk::InstanceCreateInfo instanceCreateInfo(vk::InstanceCreateFlags(),	// Flags
+                                                      &appInfo,						// Application Info
+                                                      layers.size(),				// layers count
+                                                      layers.data());				// Layers
+            m_instance = vk::createInstance(instanceCreateInfo);
+
+            m_physicalDevice = m_instance.enumeratePhysicalDevices()[1];
+            auto p = m_physicalDevice.getProperties();
+//        std::cout << "Device Name: " << p.deviceName << std::endl;
+
+
+            auto queueFamilyProps = m_physicalDevice.getQueueFamilyProperties();
+            auto propIt = std::find_if(queueFamilyProps.begin(), queueFamilyProps.end(), [](const vk::QueueFamilyProperties& prop)
+            {
+                return prop.queueFlags & vk::QueueFlagBits::eCompute;
+            });
+            const uint32_t queueFamilyIndex = std::distance(queueFamilyProps.begin(), propIt);
+
+            // Just to avoid a warning from the Vulkan Validation Layer
+            const float queuePriority = 1.0f;
+            const vk::DeviceQueueCreateInfo deviceQueueCreateInfo({}, queueFamilyIndex, 1, &queuePriority);
+            m_device = m_physicalDevice.createDevice(vk::DeviceCreateInfo({}, deviceQueueCreateInfo));
+            m_computeQueue = m_device.getQueue(queueFamilyIndex, 0);
+
+            vk::CommandPoolCreateInfo poolCreateInfo(vk::CommandPoolCreateFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer), queueFamilyIndex);
+            m_commandPool = m_device.createCommandPool(poolCreateInfo);
+
+        }
+
+        ~Device() {
+            m_device.resetCommandPool(m_commandPool, vk::CommandPoolResetFlags());
+            m_device.waitIdle();
+            m_device.destroyCommandPool(m_commandPool);
+            m_device.destroy();
+            m_instance.destroy();
+        }
+
+        [[nodiscard]] vk::Instance instance() const { return m_instance; }
+        [[nodiscard]] vk::PhysicalDevice physicalDevice() const { return m_physicalDevice; }
+        [[nodiscard]] vk::Device getDevice() const { return m_device; }
+        [[nodiscard]] vk::Queue computeQueue() const { return m_computeQueue; }
+
+        [[nodiscard]] uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) const {
+            vk::PhysicalDeviceMemoryProperties memProperties = m_physicalDevice.getMemoryProperties();
+
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
+
+            throw std::runtime_error("Failed to find suitable memory type!");
+        }
+
+        void freeCommandBuffer(vk::CommandBuffer commandBuffer) const {m_device.freeCommandBuffers(m_commandPool, 1, &commandBuffer);}
+        void executeSingleCommand(const std::function<void(vk::CommandBuffer&)>& function) const {
+            vk::CommandBuffer commandBuffer = allocateCommandBuffer();
+
+            commandBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+
+            function(commandBuffer);
+
+            commandBuffer.end();
+
+            vk::SubmitInfo submitInfo(0, nullptr, nullptr, 1, &commandBuffer);
+            m_computeQueue.submit(submitInfo, nullptr);
+            m_computeQueue.waitIdle();
+            m_device.freeCommandBuffers(m_commandPool, commandBuffer);
+        }
+        void copyBuffer(vk::Buffer srcBuffer, vk::Buffer dstBuffer, vk::DeviceSize size) const {
+            executeSingleCommand([&](vk::CommandBuffer& commandBuffer) {
+                vk::BufferCopy copyRegion(0, 0, size);
+                commandBuffer.copyBuffer(srcBuffer, dstBuffer, copyRegion);
+            });
+        }
+        [[nodiscard]] vk::CommandBuffer allocateCommandBuffer(vk::CommandBufferLevel level = vk::CommandBufferLevel::ePrimary) const {
+            vk::CommandBufferAllocateInfo allocInfo(m_commandPool, level, 1);
+            return m_device.allocateCommandBuffers(allocInfo).front();
+        }
+
+
+    private:
+
+        vk::Instance m_instance;
+        vk::PhysicalDevice m_physicalDevice;
+        vk::Device m_device;
+        vk::Queue m_computeQueue;
+        vk::CommandPool m_commandPool;
+
+    };
+
+    class Buffer {
+    public:
+        Buffer(const Device& device, vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties)
+                : m_deviceRef(device), m_size(size) {
+            m_isHostBuffer = (properties & vk::MemoryPropertyFlagBits::eHostVisible) == vk::MemoryPropertyFlagBits::eHostVisible;
+//        if (!m_isHostBuffer) {
+//            std::cout << "Creating buffer of size " << size << std::endl;
+//        } else {
+//            std::cout << "Creating host visible buffer of size " << size << std::endl;
+//        }
+            vk::BufferCreateInfo bufferCreateInfo(vk::BufferCreateFlags(), size, usage, vk::SharingMode::eExclusive);
+            m_buffer = device.getDevice().createBuffer(bufferCreateInfo);
+
+            vk::MemoryRequirements memRequirements = device.getDevice().getBufferMemoryRequirements(m_buffer);
+
+            vk::MemoryAllocateInfo allocInfo(memRequirements.size, device.findMemoryType(memRequirements.memoryTypeBits, properties));
+
+            m_bufferMemory = device.getDevice().allocateMemory(allocInfo);
+
+            device.getDevice().bindBufferMemory(m_buffer, m_bufferMemory, 0);
+        }
+        Buffer(const Buffer &) = delete;
+        Buffer &operator=(const Buffer &) = delete;
+        ~Buffer() {
+            m_deviceRef.getDevice().destroyBuffer(m_buffer);
+            m_deviceRef.getDevice().freeMemory(m_bufferMemory);
+        }
+
+        void map(vk::DeviceSize size = VK_WHOLE_SIZE) {
+            if (m_mapped != nullptr) return;
+            auto res = m_deviceRef.getDevice().mapMemory(m_bufferMemory, 0, size, vk::MemoryMapFlags(), &m_mapped);
+            if (res != vk::Result::eSuccess || m_mapped == nullptr) {
+                throw std::runtime_error("Failed to map memory");
+            }
+        }
+
+        void copyTo(void* data, vk::DeviceSize size = VK_WHOLE_SIZE) {
+            if (size == VK_WHOLE_SIZE) size = m_size;
+            memcpy(m_mapped, data, size);
+        }
+
+        void unmap() {
+            m_deviceRef.getDevice().unmapMemory(m_bufferMemory);
+            m_mapped = nullptr;
+        }
+
+        void swap(Buffer& other) {
+            std::swap(m_isHostBuffer, other.m_isHostBuffer);
+            std::swap(m_changed, other.m_changed);
+            std::swap(m_buffer, other.m_buffer);
+            std::swap(m_bufferMemory, other.m_bufferMemory);
+            std::swap(m_size, other.m_size);
+            std::swap(m_mapped, other.m_mapped);
+        }
+
+        [[nodiscard]] vk::Buffer getBuffer() const { return m_buffer; }
+        [[nodiscard]] vk::DeviceMemory getMemory() const { return m_bufferMemory; }
+        [[nodiscard]] vk::DeviceSize getSize() const { return m_size; }
+        [[nodiscard]] vk::DescriptorBufferInfo descriptorInfo(vk::DeviceSize size = VK_WHOLE_SIZE, vk::DeviceSize offset = 0) const
+        { return {m_buffer, offset, size}; }
+        [[nodiscard]] bool changed() const { return m_changed; }
+        void setAsChanged() { m_changed = true; }
+
+        void readAll(void* data) {
+            if (m_isHostBuffer) {
+                map();
+                memcpy((void *) data, m_mapped, (size_t) m_size);
+                unmap();
+                return;
+            }
+
+            Buffer stagingBuffer(m_deviceRef, m_size, vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            m_deviceRef.copyBuffer(m_buffer, stagingBuffer.getBuffer(), m_size);
+            stagingBuffer.readAll(data);
+
+        }
+
+        void writeAll(void* data) {
+            if (m_isHostBuffer) {
+                map();
+                copyTo(data, m_size);
+                unmap();
+                return;
+            }
+
+
+            Buffer stagingBuffer(m_deviceRef, m_size, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            stagingBuffer.writeAll(data);
+
+            m_deviceRef.copyBuffer(stagingBuffer.getBuffer(), m_buffer, m_size);
+        }
+
+        template<typename T>
+        void write(T& data) {
+            if (m_isHostBuffer) {
+                map();
+                copyTo((void*) &data, sizeof(T));
+                unmap();
+                return;
+            }
+
+            size_t size = sizeof(data);
+            if (size > m_size) {
+                throw std::runtime_error("Buffer too small to receive data, struct has " +
+                                         std::to_string(size) +
+                                         " bytes, buffer has " +
+                                         std::to_string(m_size) +
+                                         " bytes");        }
+            Buffer stagingBuffer(m_deviceRef, size, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            stagingBuffer.write(data);
+
+            m_deviceRef.copyBuffer(stagingBuffer.getBuffer(), m_buffer, size);
+        }
+
+        template<typename InputIt>
+        void write(InputIt first, InputIt last) {
+            size_t size = std::distance(first, last)*sizeof(*first);
+            if (m_isHostBuffer) {
+                map();
+                auto pointer = static_cast<decltype(&(*first))>(m_mapped);
+#pragma omp parallel for
+                for (uint32_t i = 0; i < std::distance(first, last); i++) {
+                    pointer[i] = first[i];
+                }
+                std::copy(first, last, static_cast<decltype(&(*first))>(m_mapped));
+                unmap();
+                return;
+            }
+
+            if (size > m_size) {
+                throw std::runtime_error("Buffer too small to receive data, vector has " +
+                                         std::to_string(size) +
+                                         " bytes, buffer has " +
+                                         std::to_string(m_size) +
+                                         " bytes");        }
+            Buffer stagingBuffer(m_deviceRef, size, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            stagingBuffer.write(first, last);
+
+            m_deviceRef.copyBuffer(stagingBuffer.getBuffer(), m_buffer, size);
+        }
+
+        template<typename T>
+        void read(T &data) {
+            if (m_isHostBuffer) {
+                map();
+                memcpy((void *) &data, m_mapped, (size_t) m_size);
+                unmap();
+                return;
+            }
+
+            size_t size = std::min(sizeof(T), m_size);
+            Buffer stagingBuffer(m_deviceRef, size, vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            m_deviceRef.copyBuffer(m_buffer, stagingBuffer.getBuffer(), size);
+            stagingBuffer.read(data);
+
+        }
+
+        template<typename InputIt>
+        void read(InputIt first, InputIt last) {
+            size_t size = std::distance(first, last)*sizeof(*first);
+
+            if (m_isHostBuffer) {
+                map();
+                auto pointer = static_cast<decltype(&(*first))>(m_mapped);
+#pragma omp parallel for
+                for (uint32_t i = 0; i < std::distance(first, last); i++) {
+                    first[i] = pointer[i];
+                }
+                unmap();
+                return;
+            }
+
+            if (m_size > size) {
+                throw std::runtime_error("Vector too small to receive data, vector has " +
+                                         std::to_string(size) +
+                                         " bytes, buffer has " +
+                                         std::to_string(m_size) +
+                                         " bytes");
+            }
+            Buffer stagingBuffer(m_deviceRef, size, vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            m_deviceRef.copyBuffer(m_buffer, stagingBuffer.getBuffer(), m_size);
+            stagingBuffer.read(first, last);
+
+        }
+
+    private:
+
+        const Device& m_deviceRef;
+        bool m_isHostBuffer = false;
+        bool m_changed = false;
+        vk::Buffer m_buffer;
+        vk::DeviceMemory m_bufferMemory;
+        vk::DeviceSize m_size;
+        void* m_mapped = nullptr;
+    };
+
+    class DescriptorPool {
+    public:
+        class Builder {
+        public:
+            explicit Builder(const Device& device): m_deviceRef(device) {}
+
+            Builder& addPoolSize(vk::DescriptorPoolSize poolSize) {
+                m_poolSizes.push_back(poolSize);
+                return *this;
+            }
+            Builder& setFlags(vk::DescriptorPoolCreateFlags flags) { m_poolFlags = flags; return *this; }
+            Builder& setMaxSets(uint32_t maxSets) { m_poolMaxSets = maxSets; return *this; }
+            Builder& setMaxSetsTimesSizes(uint32_t maxSets) { m_poolMaxSets = maxSets*m_poolSizes.size(); return *this; }
+            [[nodiscard]] DescriptorPool build() const {
+                return {m_deviceRef, m_poolSizes, m_poolFlags, m_poolMaxSets};
+            }
+
+        private:
+            const Device& m_deviceRef;
+            std::vector<vk::DescriptorPoolSize> m_poolSizes{};
+            vk::DescriptorPoolCreateFlags m_poolFlags;
+            uint32_t m_poolMaxSets = 1000;
+        };
+
+        DescriptorPool(const Device &device, const std::vector<vk::DescriptorPoolSize>& poolSizes, vk::DescriptorPoolCreateFlags poolFlags, uint32_t poolMaxSets)
+                : m_deviceRef(device) {
+            vk::DescriptorPoolCreateInfo poolInfo({}, poolMaxSets, poolSizes.size(), poolSizes.data());
+            m_descriptorPool = m_deviceRef.getDevice().createDescriptorPool(poolInfo);
+        }
+        ~DescriptorPool() {
+            m_deviceRef.getDevice().resetDescriptorPool(m_descriptorPool);
+            m_deviceRef.getDevice().destroyDescriptorPool(m_descriptorPool);
+        }
+
+        [[nodiscard]] vk::DescriptorPool getDescriptorPool() const { return m_descriptorPool; }
+
+    private:
+        const Device& m_deviceRef;
+
+        vk::DescriptorPool m_descriptorPool{};
+    };
+
+    class Kernel {
+    public:
+        Kernel(const Device &device, const std::vector<vk::DescriptorSetLayoutBinding>& layout, std::string  shaderData)
+                : m_deviceRef(device), m_shaderData(std::move(shaderData)), m_layout(layout){
+            auto compilerOptions = shaderc::CompileOptions();
+            compilerOptions.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
+            const auto compiled = shaderc::Compiler().CompileGlslToSpv(m_shaderData, shaderc_compute_shader, "shader.comp", compilerOptions);
+
+            if (compiled.GetNumErrors() > 0) {
+                std::cerr << compiled.GetErrorMessage();
+                std::cerr << "Shader Code:\n" << m_shaderData << std::endl;
+                throw std::runtime_error("Failed to compile shader");
+            }
+
+            const std::vector<uint32_t> spirv (compiled.cbegin(), compiled.cend());
+            m_shaderModule = device.getDevice().createShaderModule(vk::ShaderModuleCreateInfo({}, spirv));
+
+            m_descriptorSetLayout = device.getDevice().createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo(vk::DescriptorSetLayoutCreateFlags(), layout));
+            vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo(vk::PipelineLayoutCreateFlags(), m_descriptorSetLayout);
+            m_pipelineLayout = device.getDevice().createPipelineLayout(pipelineLayoutCreateInfo);
+            m_cache = device.getDevice().createPipelineCache(vk::PipelineCacheCreateInfo());
+
+            vk::PipelineShaderStageCreateInfo pipelineShaderCreateInfo(vk::PipelineShaderStageCreateFlags(),  // Flags
+                                                                       vk::ShaderStageFlagBits::eCompute,     // Stage
+                                                                       m_shaderModule,					      // Shader Module
+                                                                       "main");								  // Shader Entry Point
+            vk::ComputePipelineCreateInfo pipelineCreateInfo(vk::PipelineCreateFlags(),	// Flags
+                                                             pipelineShaderCreateInfo,	// Shader Create Info struct
+                                                             m_pipelineLayout);			// Pipeline Layout
+            m_pipeline = device.getDevice().createComputePipeline(m_cache, pipelineCreateInfo).value;
+        }
+        Kernel(Kernel& other) = delete;
+        Kernel operator=(Kernel& other) = delete;
+        ~Kernel() {
+            m_deviceRef.getDevice().destroyDescriptorSetLayout(m_descriptorSetLayout);
+            m_deviceRef.getDevice().destroyPipeline(m_pipeline);
+            m_deviceRef.getDevice().destroyPipelineLayout(m_pipelineLayout);
+            m_deviceRef.getDevice().destroyPipelineCache(m_cache);
+            m_deviceRef.getDevice().destroyShaderModule(m_shaderModule);
+        }
+
+        void addDescriptorSet(DescriptorPool& pool, const std::vector<vk::DescriptorBufferInfo>& bufferInfos) {
+            m_bufferInfos.emplace_back(bufferInfos);
+            vk::DescriptorSetAllocateInfo allocInfo(pool.getDescriptorPool(), 1, &m_descriptorSetLayout);
+            const std::vector<vk::DescriptorSet> sets = m_deviceRef.getDevice().allocateDescriptorSets(allocInfo);
+            m_sets.push_back(sets.front());
+
+            std::vector<vk::WriteDescriptorSet> descriptorWrites(bufferInfos.size());
+            for (size_t i = 0; i < bufferInfos.size(); ++i) {
+                descriptorWrites[i] = vk::WriteDescriptorSet(m_sets.back(), i, 0, 1,
+                                                             m_layout[i].descriptorType, nullptr,
+                                                             &bufferInfos[i],nullptr);
+            }
+
+            m_deviceRef.getDevice().updateDescriptorSets(descriptorWrites, nullptr);
+        }
+        uint32_t findOrAddDescriptorSet(DescriptorPool& pool, const std::vector<vk::DescriptorBufferInfo>& bufferInfos) {
+            for (uint32_t i = 0; i < m_bufferInfos.size(); ++i) {
+                if (m_bufferInfos[i] == bufferInfos) return i;
+            }
+            addDescriptorSet(pool, bufferInfos);
+            return m_sets.size() - 1;
+        }
+        void run(vk::CommandBuffer commandBuffer, uint32_t setIdx, uint32_t x, uint32_t y, uint32_t z) const {
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_pipeline);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, m_pipelineLayout, 0, m_sets[setIdx], nullptr);
+            commandBuffer.dispatch(x, y, z);
+        }
+
+        [[nodiscard]] vk::Pipeline getPipeline() const { return m_pipeline; }
+
+    private:
+        const Device& m_deviceRef;
+        std::string m_shaderData;
+        vk::Pipeline m_pipeline;
+        vk::PipelineLayout m_pipelineLayout;
+        vk::PipelineCache m_cache;
+        vk::ShaderModule m_shaderModule;
+        vk::DescriptorSetLayout m_descriptorSetLayout;
+        std::vector<vk::DescriptorSet> m_sets;
+        std::vector<std::vector<vk::DescriptorBufferInfo>> m_bufferInfos;
+        std::vector<vk::DescriptorSetLayoutBinding> m_layout;
+    };
+
+    class ComputeHandler {
+    public:
+        explicit ComputeHandler(const Device &device): m_deviceRef(device) {
+            m_fence = m_deviceRef.getDevice().createFence(vk::FenceCreateInfo(vk::FenceCreateFlagBits::eSignaled));
+            m_semaphore = m_deviceRef.getDevice().createSemaphore(vk::SemaphoreCreateInfo());
+            m_commandBuffer = m_deviceRef.allocateCommandBuffer();
+        }
+        ~ComputeHandler() {
+            m_deviceRef.freeCommandBuffer(m_commandBuffer);
+            m_deviceRef.getDevice().destroyFence(m_fence);
+            m_deviceRef.getDevice().destroySemaphore(m_semaphore);
+        }
+        ComputeHandler(const ComputeHandler &) = delete;
+        ComputeHandler &operator=(const ComputeHandler &) = delete;
+
+        void computeFrame(const std::function<void(vk::CommandBuffer &)> &function) {
+            beginComputeFrame();
+            function(m_commandBuffer);
+            submitComputeFrame();
+        }
+        void beginComputeFrame() {
+//        auto res = m_deviceRef.getDevice().waitForFences(1, &m_fence, true, UINT64_MAX);
+            auto res = m_deviceRef.getDevice().resetFences(1, &m_fence);
+
+            m_commandBuffer.reset(vk::CommandBufferResetFlags());
+            m_commandBuffer.begin(vk::CommandBufferBeginInfo());
+            m_isComputeFrame = true;
+        }
+        void submitComputeFrame() {
+            m_commandBuffer.end();
+
+            vk::SubmitInfo submitInfo(0, nullptr, nullptr, 1, &m_commandBuffer);
+            m_deviceRef.computeQueue().submit(submitInfo, m_fence);
+            auto res = m_deviceRef.getDevice().waitForFences(1, &m_fence, true, UINT64_MAX);
+
+            if (res != vk::Result::eSuccess) {
+                throw std::runtime_error("Failed to wait for fences");
+            }
+            m_isComputeFrame = false;
+        }
+        static void computeBarrier(vk::CommandBuffer commandBuffer, Buffer& buffer) {
+            vk::BufferMemoryBarrier bufferBarrier(
+                    vk::AccessFlagBits::eShaderWrite,
+                    vk::AccessFlagBits::eShaderRead,
+                    VK_QUEUE_FAMILY_IGNORED,
+                    VK_QUEUE_FAMILY_IGNORED,
+                    buffer.getBuffer(),
+                    0,
+                    buffer.getSize()
+            );
+
+            commandBuffer.pipelineBarrier(
+                    vk::PipelineStageFlagBits::eComputeShader,
+                    vk::PipelineStageFlagBits::eComputeShader,
+                    vk::DependencyFlags(),
+                    0,
+                    nullptr,
+                    1,
+                    &bufferBarrier,
+                    0,
+                    nullptr
+            );
+        }
+        [[nodiscard]] vk::CommandBuffer getCommandBuffer() const {
+            if (!m_isComputeFrame) {
+                throw std::runtime_error("Not in compute frame");
+            }
+            return m_commandBuffer;
+        }
+        [[nodiscard]] bool isComputeFrame() const { return m_isComputeFrame; };
+
+    private:
+        bool m_isComputeFrame = false;
+        const Device &m_deviceRef;
+
+        vk::Fence m_fence;
+        vk::Semaphore m_semaphore;
+
+        vk::CommandBuffer m_commandBuffer{};
+    };
+
+    enum GpuRegionFlags {
+        none = 0,
+        keepBuffers = 1 << 1,
+//        copyBuffersIn = 1 << 2,
+        copyBuffersOut = 1 << 2,
+    };
+
+    inline GpuRegionFlags operator| (GpuRegionFlags f1, GpuRegionFlags f2) {
+        auto v1 = static_cast<size_t>(f1);
+        auto v2 = static_cast<size_t>(f2);
+        return static_cast<GpuRegionFlags>(v1 | v2);
+    }
+
+    class VentManager {
+    private:
+        VentManager():
+                m_descriptorPool(vent::DescriptorPool::Builder(m_device)
+                                         .addPoolSize({vk::DescriptorType::eStorageBuffer, 1000})
+                                         .setMaxSets(1000)
+                                         .build())
+        {}
+        ~VentManager() = default;
+    public:
+        static VentManager& getInstance() {
+            static VentManager instance;
+            return instance;
+        }
+
+        [[nodiscard]] Device& getDevice() { return m_device; }
+        [[nodiscard]] DescriptorPool& getDescriptorPool() { return m_descriptorPool; }
+        [[nodiscard]] ComputeHandler& getComputeHandler() { return m_computeHandler; }
+        [[nodiscard]] std::unordered_map<std::string, Kernel>& getKernels() { return m_kernels; }
+        [[nodiscard]] std::unordered_map<void*, Buffer>& getBuffers() { return m_gpuBuffers; }
+        [[nodiscard]] std::unordered_map<size_t, Buffer>& getUniformBuffers() { return m_uniformBuffers; }
+        void setGpuRegionFlags(GpuRegionFlags flags) { currentFlags = flags; }
+        [[nodiscard]] GpuRegionFlags getGpuRegionFlags() const { return currentFlags; }
+
+        VentManager(VentManager const&) = delete;
+        void operator=(VentManager const&) = delete;
+
+    private:
+        Device m_device{};
+        DescriptorPool m_descriptorPool;
+        ComputeHandler m_computeHandler{m_device};
+        std::unordered_map<std::string, Kernel> m_kernels;
+        std::unordered_map<void*, Buffer> m_gpuBuffers;
+        std::unordered_map<size_t, Buffer> m_uniformBuffers;
+        GpuRegionFlags currentFlags = GpuRegionFlags::none;
+    };
+
 
     template<std::size_t I = 0, typename FuncT, typename... Tp>
     inline typename std::enable_if<I == sizeof...(Tp), void>::type
