@@ -432,80 +432,6 @@ TEST(VentTest, BigJacobi) {
     ASSERT_LT(error(maxDiff, maxDiff2), 0.01);
 }
 
-TEST(VentTest, NBody) {
-//    uint32_t iter = 1'000;
-//    uint32_t numParticles = 10'000;
-    uint32_t iter = 10;
-    uint32_t numParticles = 10;
-    std::vector<float> initialPos(numParticles, 0);
-    std::vector<float> initialVel(numParticles, 0);
-    for (size_t i = 0; i < numParticles; i++) {
-        initialPos[i] = randomFloat(-100, 100);
-        initialVel[i] = randomFloat(-1, 1);
-    }
-    auto resetParticles = [numParticles, &initialPos, &initialVel](auto& p, auto& v) {
-        for (size_t i = 0; i < numParticles; i++) {
-            p[i] = initialPos[i];
-            v[i] = initialVel[i];
-        }
-    };
-    std::vector<float> positions(numParticles, 0);
-    std::vector<float> velocities(numParticles, 0);
-    resetParticles(positions, velocities);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    for (uint32_t i = 0; i < iter; i++) {
-        vent::gpu_region(vent::GpuRegionFlags::keepBuffers | ((i == iter-1) ? vent::GpuRegionFlags::copyBuffersOut : vent::GpuRegionFlags::none),
-                         [&](){
-                             for (size_t i = 0; i < positions.size(); i++) {
-                                 vent::transform(positions.begin(), positions.end(), velocities.begin(), velocities.begin(),
-                                                 R"(float func(float p, float v) {
-                                                float diff = pi - p;
-                                                if (diff < 1e-5) return v;
-                                                float invDist = 1.0 / abs(diff);
-                                                float invDistCube = invDist * invDist * invDist;
-                                                float s = 1.0f;
-                                                return v + s * diff * invDistCube * 0.01f;
-                                            }
-                                            )", std::make_tuple(std::make_pair("pi", positions[i])));
-
-                                 vent::transform(positions.begin(), positions.end(), velocities.begin(), positions.begin(),
-                                                 R"(float func(float p, float v) {
-                                                return p + v * 0.01f;
-                                })");
-                             }
-                         });
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    double gpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    std::cout << "GPU Time: " << gpuTime << "s\n";
-
-    resetParticles(positions, velocities);
-
-    start = std::chrono::high_resolution_clock::now();
-    for (uint32_t k = 0; k < iter; k++) {
-        for (size_t i = 0; i < positions.size(); i++) {
-            for (size_t j = 0; j < positions.size(); j++) {
-                if (i == j) continue;
-                float diff = positions[j] - positions[i];
-                if (diff < 1e-5f) continue;
-                float invDist = 1.0f / std::abs(diff);
-                float invDistCube = invDist * invDist * invDist;
-                float s = 1.0f;
-                velocities[i] += s * diff * invDistCube * 0.01f;
-            }
-        }
-        for (size_t i = 0; i < positions.size(); i++) {
-            positions[i] += velocities[i] * 0.01f;
-        }
-    }
-    end = std::chrono::high_resolution_clock::now();
-    double cpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    std::cout << "CPU Time: " << cpuTime << "s\n";
-
-    std::cout << "Speedup: " << cpuTime / gpuTime << "\n";
-}
-
 TEST(VentTest, SimpleCG) {
     auto pcg = []<typename T>(std::vector<T>& matrix, std::vector<T>& b, std::vector<T>& res, T epsilon) {
         auto dot = [](const std::vector<T>& a, const std::vector<T>& b) {
@@ -785,3 +711,139 @@ TEST(VentTest, MediumCG) {
     }
 }
 
+TEST(VentTest, BigCG) {
+    const uint32_t cells_per_line = 120;
+
+    std::vector<float> solidCells(cells_per_line*cells_per_line);
+    for (uint32_t i = 0; i < cells_per_line; ++i) {
+        for (uint32_t j = 0; j < cells_per_line; ++j) {
+            solidCells[i + cells_per_line*j] = (i == 0 || j == 0 || i == cells_per_line - 1 || j == cells_per_line - 1) ? 0 : 1;
+        }
+    }
+
+    std::vector<float> m(solidCells.size()*solidCells.size());
+
+    for (uint32_t i = 1; i < solidCells.size(); ++i) {
+        if (i < cells_per_line ||
+            i % cells_per_line == 0 ||
+            i % cells_per_line == cells_per_line - 1 ||
+            i >= solidCells.size() - cells_per_line)
+            continue;
+
+        uint total = 0;
+        uint typeRight = (uint) solidCells[i+1];
+        m[i*solidCells.size() + i+1] = (typeRight == 1) ? -1 : 0;
+        total += uint(typeRight != 0);
+
+        uint typeLeft = (uint) solidCells[i-1];
+        m[i*solidCells.size() + i-1] = (typeLeft == 1) ? -1 : 0;
+        total += uint(typeLeft != 0);
+
+        uint typeForward = (uint) solidCells[i+cells_per_line];
+        m[i*solidCells.size() + i+cells_per_line] = (typeForward == 1) ? -1 : 0;
+        total += uint(typeForward != 0);
+
+        uint typeBackward = (uint) solidCells[i-cells_per_line];
+        m[i*solidCells.size() + i-cells_per_line] = (typeBackward == 1) ? -1 : 0;
+        total += uint(typeBackward != 0);
+
+        m[i*solidCells.size() + i] = float(total);
+    }
+
+
+    std::vector<float> b(solidCells.size());
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (solidCells[i] == 0) continue;
+        b[i] = float(i);
+    }
+    std::vector<float> res(solidCells.size(), 0);
+
+    std::cout << "Solving a linear system using the CG method\n";
+    auto start = std::chrono::high_resolution_clock::now();
+    pcg(m, b, res);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto seq_time = std::chrono::duration<double>(end - start).count();
+    std::cout << "Time taken using a single thread: " << seq_time << " seconds\n";
+    std::fill(res.begin(), res.end(), 0);
+    start = std::chrono::high_resolution_clock::now();
+    vent::linsolve(m.begin(), m.end(), b.begin(), res.begin(), 200, 1e-6, true);
+    end = std::chrono::high_resolution_clock::now();
+    auto time = std::chrono::duration<double>(end - start).count();
+    std::cout << "Time taken using vent: " << time << " seconds, speedup: " << seq_time/time << "\n";
+
+    ASSERT_GT(seq_time, time);
+}
+
+TEST(VentTestAdv, NBody) {
+//    uint32_t iter = 1'000;
+//    uint32_t numParticles = 10'000;
+    uint32_t iter = 10;
+    uint32_t numParticles = 10;
+    std::vector<float> initialPos(numParticles, 0);
+    std::vector<float> initialVel(numParticles, 0);
+    for (size_t i = 0; i < numParticles; i++) {
+        initialPos[i] = randomFloat(-100, 100);
+        initialVel[i] = randomFloat(-1, 1);
+    }
+    auto resetParticles = [numParticles, &initialPos, &initialVel](auto& p, auto& v) {
+        for (size_t i = 0; i < numParticles; i++) {
+            p[i] = initialPos[i];
+            v[i] = initialVel[i];
+        }
+    };
+    std::vector<float> positions(numParticles, 0);
+    std::vector<float> velocities(numParticles, 0);
+    resetParticles(positions, velocities);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    for (uint32_t i = 0; i < iter; i++) {
+        vent::gpu_region(vent::GpuRegionFlags::keepBuffers | ((i == iter-1) ? vent::GpuRegionFlags::copyBuffersOut : vent::GpuRegionFlags::none),
+                         [&](){
+                             for (size_t i = 0; i < positions.size(); i++) {
+                                 vent::transform(positions.begin(), positions.end(), velocities.begin(), velocities.begin(),
+                                                 R"(float func(float p, float v) {
+                                                float diff = pi - p;
+                                                if (diff < 1e-5) return v;
+                                                float invDist = 1.0 / abs(diff);
+                                                float invDistCube = invDist * invDist * invDist;
+                                                float s = 1.0f;
+                                                return v + s * diff * invDistCube * 0.01f;
+                                            }
+                                            )", std::make_tuple(std::make_pair("pi", positions[i])));
+
+                                 vent::transform(positions.begin(), positions.end(), velocities.begin(), positions.begin(),
+                                                 R"(float func(float p, float v) {
+                                                return p + v * 0.01f;
+                                })");
+                             }
+                         });
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    double gpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    std::cout << "GPU Time: " << gpuTime << "s\n";
+
+    resetParticles(positions, velocities);
+
+    start = std::chrono::high_resolution_clock::now();
+    for (uint32_t k = 0; k < iter; k++) {
+        for (size_t i = 0; i < positions.size(); i++) {
+            for (size_t j = 0; j < positions.size(); j++) {
+                if (i == j) continue;
+                float diff = positions[j] - positions[i];
+                if (diff < 1e-5f) continue;
+                float invDist = 1.0f / std::abs(diff);
+                float invDistCube = invDist * invDist * invDist;
+                float s = 1.0f;
+                velocities[i] += s * diff * invDistCube * 0.01f;
+            }
+        }
+        for (size_t i = 0; i < positions.size(); i++) {
+            positions[i] += velocities[i] * 0.01f;
+        }
+    }
+    end = std::chrono::high_resolution_clock::now();
+    double cpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    std::cout << "CPU Time: " << cpuTime << "s\n";
+
+    std::cout << "Speedup: " << cpuTime / gpuTime << "\n";
+}

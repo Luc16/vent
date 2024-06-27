@@ -853,6 +853,22 @@ namespace vent {
         return vent::gpu_transform_reduce(first, last, init, reduceOp, "", args, isHostBuffer);
     }
 
+    /* @brief Transforms the elements in the range [first1, last1) using the
+     *        operation provided and writes the result to the range starting at
+     *        d_first.
+     *
+     *  @param first1  Input iterator to the beginning of the range.
+     *  @param last1   Input iterator to the end of the range.
+     *  @param d_first Output iterator to the beginning of the destination range.
+     *  @param operation The operation to be applied to the elements.
+     *                 The operation should be string that represents a function in
+     *                 glsl that takes a single argument of the same
+     *                 type as the elements in the input range and returns a value of
+     *                 the same type of the output range.
+     *  @param args     Additional arguments to be passed to the operation.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return Output iterator to the beginning of the destination range.
+     */
     template< class InputIt, class OutputIt, typename... Tp>
     OutputIt transform( InputIt first1, InputIt last1,
                         OutputIt d_first, const std::string& operation, std::tuple<Tp...> args = {},  bool isHostBuffer = false) {
@@ -862,6 +878,22 @@ namespace vent {
         return isolated_transform(first1, last1, d_first, operation, args, isHostBuffer);
     }
 
+    /* @brief Transforms the elements in the range [first1, last1) and [first2, first2 + (last1 - first1)) using the
+     *        operation provided and writes the result to the range starting at d_first.
+     *
+     *  @param first1  Input iterator to the beginning of the first range.
+     *  @param last1   Input iterator to the end of the first range.
+     *  @param first2  Input iterator to the beginning of the second range.
+     *  @param d_first Output iterator to the beginning of the destination range.
+     *  @param operation The operation to be applied to the elements.
+     *                 The operation should be string that represents a function in
+     *                 glsl that takes two arguments of the same
+     *                 type as the elements in the input ranges and returns a value of
+     *                 the same type of the output range.
+     *  @param args     Additional arguments to be passed to the operation.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return Output iterator to the beginning of the destination range.
+     */
     template< class InputIt1, class InputIt2, class OutputIt, typename... Tp>
     OutputIt transform( InputIt1 first1, InputIt1 last1, InputIt2 first2,
                         OutputIt d_first, const std::string& operation, std::tuple<Tp...> args = {},  bool isHostBuffer = false) {
@@ -871,6 +903,22 @@ namespace vent {
         return isolated_transform(first1, last1, first2, d_first, operation, args, isHostBuffer);
     }
 
+    /* @brief Transforms the elements in the range [first, last) using the
+     *        operation provided and applies a reduction operation, returning the result.
+     *
+     *  @param first  Input iterator to the beginning of the range.
+     *  @param last   Input iterator to the end of the range.
+     *  @param init   Initial value of the reduction operation.
+     *  @param reduceOp The reduction operation to be applied to the elements.
+     *  @param operation The operation to be applied to the elements.
+     *                 The operation should be string that represents a function in
+     *                 glsl that takes a single argument of the same
+     *                 type as the elements in the input range and returns a value of
+     *                 the same type of the output range.
+     *  @param args     Additional arguments to be passed to the operation.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return The result of the reduction operation.
+     */
     template< class InputIt, class T, typename... Tp>
     T transform_reduce( InputIt first, InputIt last, T init,
                         ReduceOperation reduceOp = ReduceOperation::add, const std::string& transformOp = "", std::tuple<Tp...> args = {},  bool isHostBuffer = false) {
@@ -880,6 +928,23 @@ namespace vent {
         return isolated_transform_reduce(first, last, init, reduceOp, transformOp, args, isHostBuffer);
     }
 
+    /* @brief Transforms the elements in the range [first1, last1) and [first2, first2 + (last1 - first1)) using the
+     *        operation provided and applies a reduction operation, returning the result.
+     *
+     *  @param first1  Input iterator to the beginning of the first range.
+     *  @param last1   Input iterator to the end of the first range.
+     *  @param first2  Input iterator to the beginning of the second range.
+     *  @param init    Initial value of the reduction operation.
+     *  @param reduceOp The reduction operation to be applied to the elements.
+     *  @param operation The operation to be applied to the elements.
+     *                 The operation should be string that represents a function in
+     *                 glsl that takes two arguments of the same
+     *                 type as the elements in the input ranges and returns a value of
+     *                 the same type of the output range.
+     *  @param args     Additional arguments to be passed to the operation.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return The result of the reduction operation.
+     */
     template< class InputIt1, class InputIt2, class T, typename... Tp>
     T transform_reduce( InputIt1 first1, InputIt1 last1, InputIt2 first2, T init,
                         ReduceOperation reduceOp = ReduceOperation::add, const std::string& transformOp = "", std::tuple<Tp...> args = {},  bool isHostBuffer = false) {
@@ -889,13 +954,23 @@ namespace vent {
         return isolated_transform_reduce(first1, last1, first2, init, reduceOp, transformOp, args, isHostBuffer);
     }
 
+    /* @brief Applies a reduction operation to the elements in the range [first, last).
+     *
+     *  @param first  Input iterator to the beginning of the range.
+     *  @param last   Input iterator to the end of the range.
+     *  @param init   Initial value of the reduction operation.
+     *  @param reduceOp The reduction operation to be applied to the elements.
+     *  @param args     Additional arguments to be passed to the operation.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return The result of the reduction operation.
+     */
     template< class InputIt, class T, typename... Tp>
     T reduce( InputIt first, InputIt last, T init,
-              ReduceOperation reduceOp = ReduceOperation::add, std::tuple<Tp...> args = {},  bool isHostBuffer = false) {
+              ReduceOperation reduceOp = ReduceOperation::add,  bool isHostBuffer = false) {
         if (VentManager::getInstance().getComputeHandler().isComputeFrame()) {
-            return gpu_reduce(first, last, init, reduceOp, args, isHostBuffer);
+            return gpu_reduce(first, last, init, reduceOp, {}, isHostBuffer);
         }
-        return isolated_reduce(first, last, init, reduceOp, args, isHostBuffer);
+        return isolated_reduce(first, last, init, reduceOp, {}, isHostBuffer);
     }
 
 
@@ -1226,7 +1301,20 @@ namespace vent {
         return d_first;
     }
 
-
+    /* @brief Solves the linear system of equations Ax = b.
+     *
+     * If the matrix is positive definite, the conjugate gradient method is used.
+     * Otherwise, the Jacobi method is used.
+     *
+     *  @param first1  Input iterator to the beginning of the matrix.
+     *  @param last1   Input iterator to the end of the matrix.
+     *  @param first2  Input iterator to the beginning of the vector.
+     *  @param d_first Output iterator to the beginning of the destination vector.
+     *  @param maxIters Maximum number of iterations.
+     *  @param epsilon  Error tolerance.
+     *  @param isHostBuffer If true, the buffer will be host visible and coherent.
+     *  @return Output iterator to the beginning of the destination vector.
+     */
     template< class InputIt1, class InputIt2, class OutputIt>
     OutputIt linsolve( InputIt1 first1, InputIt1 last1, InputIt2 first2, OutputIt d_first, uint32_t maxIters, double epsilon, bool isPositiveDefinite = false, bool isHostBuffer = false) {
         if (isPositiveDefinite) {
